@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
+contract NFTMarketplace is ReentrancyGuard {
+    struct Listing {
+        uint256 price;
+        address seller;
+        bool isActive;
+    }
+    
+    // Комиссия маркетплейса (в базисных пунктах, 250 = 2.5%)
+    uint256 public constant MARKETPLACE_FEE = 250;
+    address public immutable feeRecipient;
+    
+    // NFT контракт => Token ID => Listing
+    mapping(address => mapping(uint256 => Listing)) public listings;
+    
+    event ItemListed(
+        address indexed nftContract,
+        uint256 indexed tokenId,
+        address indexed seller,
+        uint256 price
+    );
+    
+    event ItemSold(
+        address indexed nftContract,
+        uint256 indexed tokenId,
+        address indexed buyer,
+        address seller,
+        uint256 price
+    );
+    
+    event ListingCancelled(
+        address indexed nftContract,
+        uint256 indexed tokenId,
+        address indexed seller
+    );
+    
+    constructor(address _feeRecipient) {
+        feeRecipient = _feeRecipient;
+    }
+    
+    // Выставить NFT на продажу
+    function listItem(
+        address nftContract,
+        uint256 tokenId,
+        uint256 price
+    ) external {
+        require(price > 0, "Цена должна быть больше 0");
+        
+        IERC721 nft = IERC721(nftContract);
+        require(nft.ownerOf(tokenId) == msg.sender, "Вы не владелец NFT");
+        require(
+            nft.getApproved(tokenId) == address(this) ||
+            nft.isApprovedForAll(msg.sender, address(this)),
+            "Маркетплейс не одобрен"
+        );
+        
+        listings[nftContract][tokenId] = Listing({
+            price: price,
+            seller: msg.sender,
+            isActive: true
+        });
+        
+        emit ItemListed(nftContract, tokenId, msg.sender, price);
+    }
+    
+    // Купить NFT
+    function buyItem(
+        address nftContract,
+        uint256 tokenId
+    ) external payable nonReentrant {
+        Listing memory listing = listings[nftContract][tokenId];
+        
+        require(listing.isActive, "NFT не продается");
+        require(msg.value == listing.price, "Неверная сумма оплаты");
+        
+        // Удаляем листинг
+        delete listings[nftContract][tokenId];
+        
+        // Рассчитываем комиссию
+        uint256 fee = (listing.price * MARKETPLACE_FEE) / 10000;
+        uint256 sellerProceeds = listing.price - fee;
+        
+        // Переводим NFT покупателю
+        IERC721(nftContract).safeTransferFrom(
+            listing.seller,
+            msg.sender,
+            tokenId
+        );
+        
+        // Переводим деньги
+        payable(listing.seller).transfer(sellerProceeds);
+        payable(feeRecipient).transfer(fee);
+        
+        emit ItemSold(
+            nftContract,
+            tokenId,
+            msg.sender,
+            listing.seller,
+            listing.price
+        );
+    }
+    
+    // Отменить листинг
+    function cancelListing(
+        address nftContract,
+        uint256 tokenId
+    ) external {
+        Listing memory listing = listings[nftContract][tokenId];
+        
+        require(listing.seller == msg.sender, "Вы не продавец");
+        require(listing.isActive, "Листинг не активен");
+        
+        delete listings[nftContract][tokenId];
+        
+        emit ListingCancelled(nftContract, tokenId, msg.sender);
+    }
+    
+    // Обновить цену
+    function updatePrice(
+        address nftContract,
+        uint256 tokenId,
+        uint256 newPrice
+    ) external {
+        Listing storage listing = listings[nftContract][tokenId];
+        
+        require(listing.seller == msg.sender, "Вы не продавец");
+        require(listing.isActive, "Листинг не активен");
+        require(newPrice > 0, "Цена должна быть больше 0");
+        
+        listing.price = newPrice;
+        
+        emit ItemListed(nftContract, tokenId, msg.sender, newPrice);
+    }
+}
